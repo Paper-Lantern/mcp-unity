@@ -414,6 +414,10 @@ namespace McpUnity.Unity
             GetMaterialInfoTool getMaterialInfoTool = new GetMaterialInfoTool();
             _tools.Add(getMaterialInfoTool.Name, getMaterialInfoTool);
 
+            // Register Execute C# Tool
+            ExecuteCsharpTool executeCsharpTool = new ExecuteCsharpTool();
+            _tools.Add(executeCsharpTool.Name, executeCsharpTool);
+
             // Register BatchExecuteTool (must be registered last as it needs access to other tools)
             BatchExecuteTool batchExecuteTool = new BatchExecuteTool(this);
             _tools.Add(batchExecuteTool.Name, batchExecuteTool);
