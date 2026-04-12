@@ -82,9 +82,14 @@ namespace McpUnity.Tools {
             
             // On first request, initialize compilation listeners and start compilation
             StartCompilationTracking();
-                
+
             if (EditorApplication.isCompiling == false)
             {
+                // Force Unity to detect external file changes (e.g. from Claude Write tool)
+                // Without this, Unity won't see .cs changes made while editor is unfocused
+                McpLogger.LogInfo("Refreshing AssetDatabase to detect external file changes...");
+                AssetDatabase.Refresh();
+
                 McpLogger.LogInfo("Recompiling all scripts in the Unity project");
                 CompilationPipeline.RequestScriptCompilation();
             }

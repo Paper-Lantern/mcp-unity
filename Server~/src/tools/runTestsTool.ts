@@ -61,16 +61,16 @@ async function toolHandler(mcpUnity: McpUnity, params: any = {}): Promise<CallTo
     returnWithLogs = false
   } = params;
 
-  // Create and wait for the test run
+  // Create and wait for the test run — tests can take 30s+ for large suites
   const response = await mcpUnity.sendRequest({
     method: toolName,
-    params: { 
+    params: {
       testMode,
       testFilter,
       returnOnlyFailures,
       returnWithLogs
     }
-  });
+  }, { timeout: 120000 });
   
   // Process the test results
   if (!response.success) {

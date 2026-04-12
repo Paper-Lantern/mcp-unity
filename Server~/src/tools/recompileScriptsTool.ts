@@ -57,13 +57,14 @@ async function toolHandler(mcpUnity: McpUnity, params: z.infer<typeof paramsSche
   const logsLimit = Math.max(0, Math.min(1000, params.logsLimit || 100));
 
   // Send to Unity with validated parameters
+  // Compilation can take 10-30s+ for large projects — use 60s timeout instead of default 10s
   const response = await mcpUnity.sendRequest({
     method: toolName,
     params: {
       returnWithLogs,
       logsLimit
     }
-  });
+  }, { timeout: 60000 });
 
   if (!response.success) {
     throw new McpUnityError(
