@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using Newtonsoft.Json;
@@ -51,9 +52,18 @@ namespace McpUnity.Unity
         }
         
         /// <summary>
-        /// Handle incoming messages from WebSocket clients
+        /// Global concurrency limiter — prevents main thread overload from parallel MCP requests.
+        /// Checked on the WebSocket thread BEFORE dispatching to Unity main thread.
         /// </summary>
-        protected override async void OnMessage(MessageEventArgs e)
+        private static int _activeRequests = 0;
+        private const int MAX_CONCURRENT_REQUESTS = 3;
+
+        /// <summary>
+        /// Handle incoming messages from WebSocket clients.
+        /// NON-BLOCKING: dispatches work to Unity main thread and sends response via ContinueWith callback.
+        /// WebSocket thread is released immediately — no await, no thread pool exhaustion.
+        /// </summary>
+        protected override void OnMessage(MessageEventArgs e)
         {
             try
             {
@@ -66,7 +76,6 @@ namespace McpUnity.Unity
                 catch (JsonReaderException jre)
                 {
                     McpLogger.LogError($"Invalid JSON received: {jre.Message}. Data: {e.Data}");
-                    // Attempt to send a parse error response. No requestId is available yet.
                     Send(CreateResponse(null, CreateErrorResponse($"Invalid JSON format: {jre.Message}", "invalid_json")).ToString(Formatting.None));
                     return;
                 }
@@ -74,9 +83,23 @@ namespace McpUnity.Unity
                 var method = requestJson["method"]?.ToString();
                 var parameters = requestJson["params"] as JObject ?? new JObject();
                 var requestId = requestJson["id"]?.ToString();
-                // We need to dispatch to Unity's main thread and wait for completion
+
+                // [SAFE GUARD] Reject if too many requests are already in flight
+                int current = Interlocked.CompareExchange(ref _activeRequests, 0, 0);
+                if (current >= MAX_CONCURRENT_REQUESTS)
+                {
+                    McpLogger.LogWarning($"Request '{method}' rejected — {current} requests already active (max {MAX_CONCURRENT_REQUESTS})");
+                    Send(CreateResponse(requestId, CreateErrorResponse(
+                        $"Unity is processing {current} requests. Wait 10-30 seconds and retry. Do NOT call multiple MCP tools simultaneously.",
+                        "busy"
+                    )).ToString(Formatting.None));
+                    return;
+                }
+
+                Interlocked.Increment(ref _activeRequests);
+
                 var tcs = new TaskCompletionSource<JObject>();
-                
+
                 if (string.IsNullOrEmpty(method))
                 {
                     tcs.SetResult(CreateErrorResponse("Missing method in request", "invalid_request"));
@@ -93,21 +116,38 @@ namespace McpUnity.Unity
                 {
                     tcs.SetResult(CreateErrorResponse($"Unknown method: {method}", "unknown_method"));
                 }
-                
-                JObject responseJson = await tcs.Task;
-                JObject jsonRpcResponse = CreateResponse(requestId, responseJson);
-                string responseStr = jsonRpcResponse.ToString(Formatting.None);
-                
-                McpLogger.LogInfo($"WebSocket message response for request ID '{requestId}': {responseStr}");
-                
-                // Send the response back to the client
-                Send(responseStr);
+
+                // NON-BLOCKING: respond via callback when main thread work completes.
+                // WebSocket thread returns immediately — no await, no thread pool exhaustion.
+                tcs.Task.ContinueWith(task =>
+                {
+                    Interlocked.Decrement(ref _activeRequests);
+                    try
+                    {
+                        JObject responseJson = task.IsFaulted
+                            ? CreateErrorResponse($"Internal error: {task.Exception?.InnerException?.Message}", "internal_error")
+                            : task.Result;
+                        JObject jsonRpcResponse = CreateResponse(requestId, responseJson);
+                        string responseStr = jsonRpcResponse.ToString(Formatting.None);
+                        McpLogger.LogInfo($"WebSocket response for '{requestId}': {responseStr.Substring(0, Math.Min(200, responseStr.Length))}...");
+                        Send(responseStr);
+                    }
+                    catch (Exception sendEx)
+                    {
+                        McpLogger.LogError($"Error sending response for '{requestId}': {sendEx.Message}");
+                    }
+                }, TaskScheduler.Default);
+                // ← OnMessage returns immediately. WebSocket thread is free.
             }
             catch (Exception ex)
             {
                 McpLogger.LogError($"Error processing message: {ex.Message}");
-                
-                Send(CreateErrorResponse($"Internal server error: {ex.Message}", "internal_error").ToString(Formatting.None));
+                Interlocked.Decrement(ref _activeRequests);
+                try
+                {
+                    Send(CreateErrorResponse($"Internal server error: {ex.Message}", "internal_error").ToString(Formatting.None));
+                }
+                catch { /* WebSocket may already be closed */ }
             }
         }
         

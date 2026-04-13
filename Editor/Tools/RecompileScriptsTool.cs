@@ -60,13 +60,39 @@ namespace McpUnity.Tools {
         /// </summary>
         /// <param name="parameters">Tool parameters as a JObject</param>
         /// <param name="tcs">TaskCompletionSource to set the result or exception</param>
+        /// <summary>
+        /// Tracks whether a compilation cycle is actively in progress (from our request).
+        /// Prevents re-entrant AssetDatabase.Refresh + RequestScriptCompilation calls that
+        /// cause Unity to become unresponsive.
+        /// </summary>
+        private bool _compilationInProgress = false;
+
         public override void ExecuteAsync(JObject parameters, TaskCompletionSource<JObject> tcs)
         {
             // Extract and store parameters
             var returnWithLogs = GetBoolParameter(parameters, "returnWithLogs", true);
             var logsLimit = Mathf.Clamp(GetIntParameter(parameters, "logsLimit", 100), 0, 1000);
             var request = new CompilationRequest(returnWithLogs, logsLimit, tcs);
-            
+
+            // [SAFE GUARD] If Unity is already compiling (from us or externally), do NOT
+            // call AssetDatabase.Refresh() or RequestScriptCompilation() again.
+            // Instead, return immediately with a "busy" status so Claude knows to wait.
+            if (EditorApplication.isCompiling || _compilationInProgress)
+            {
+                McpLogger.LogInfo("Compilation already in progress — returning busy status (no re-trigger)");
+                var busyResponse = new JObject
+                {
+                    ["success"] = true,
+                    ["type"] = "text",
+                    ["message"] = "⏳ Unity is currently compiling. Do NOT retry — wait 30-60 seconds and try again. " +
+                                  "Calling recompile_scripts while compilation is in progress causes Unity to become unresponsive.",
+                    ["logs"] = new JArray(),
+                    ["compiling"] = true
+                };
+                tcs.SetResult(busyResponse);
+                return;
+            }
+
             bool hasActiveRequest = false;
             lock (_pendingRequests)
             {
@@ -76,23 +102,21 @@ namespace McpUnity.Tools {
 
             if (hasActiveRequest)
             {
-                McpLogger.LogInfo("Recompilation already in progress. Waiting for completion...");
+                McpLogger.LogInfo("Recompilation already queued. Waiting for completion...");
                 return;
             }
-            
+
             // On first request, initialize compilation listeners and start compilation
+            _compilationInProgress = true;
             StartCompilationTracking();
 
-            if (EditorApplication.isCompiling == false)
-            {
-                // Force Unity to detect external file changes (e.g. from Claude Write tool)
-                // Without this, Unity won't see .cs changes made while editor is unfocused
-                McpLogger.LogInfo("Refreshing AssetDatabase to detect external file changes...");
-                AssetDatabase.Refresh();
+            // Force Unity to detect external file changes (e.g. from Claude Write tool)
+            // Without this, Unity won't see .cs changes made while editor is unfocused
+            McpLogger.LogInfo("Refreshing AssetDatabase to detect external file changes...");
+            AssetDatabase.Refresh();
 
-                McpLogger.LogInfo("Recompiling all scripts in the Unity project");
-                CompilationPipeline.RequestScriptCompilation();
-            }
+            McpLogger.LogInfo("Recompiling all scripts in the Unity project");
+            CompilationPipeline.RequestScriptCompilation();
         }
 
         /// <summary>
@@ -138,6 +162,7 @@ namespace McpUnity.Tools {
             CompilationResult result = new CompilationResult(sortedLogs, warningsCount, errorsCount);
             
             // Stop tracking before completing requests
+            _compilationInProgress = false;
             StopCompilationTracking();
             
             // Complete all requests received before compilation end, the next received request will start a new compilation
