@@ -10,77 +10,38 @@ using UnityEngine;
 
 namespace McpUnity.Tools {
     /// <summary>
-    /// Tool to recompile all scripts in the Unity project
+    /// Tool to recompile all scripts in the Unity project.
+    /// Returns immediately with "compilation_triggered" — does NOT wait for compilation.
+    /// Domain Reload destroys all C# state, so holding a TCS across compilation is impossible.
+    /// The client should wait 30-60s then call get_console_logs to check results.
     /// </summary>
     public class RecompileScriptsTool : McpToolBase
     {
-        private class CompilationRequest 
-        {
-            public readonly bool ReturnWithLogs;
-            public readonly int LogsLimit;
-            public readonly TaskCompletionSource<JObject> CompletionSource;
-            
-            public CompilationRequest(bool returnWithLogs, int logsLimit, TaskCompletionSource<JObject> completionSource)
-            {
-                ReturnWithLogs = returnWithLogs;
-                LogsLimit = logsLimit;
-                CompletionSource = completionSource;
-            }
-        }
-        
-        private class CompilationResult 
-        {
-            public readonly List<CompilerMessage> SortedLogs;
-            public readonly int WarningsCount;
-            public readonly int ErrorsCount;
-            
-            public bool HasErrors => ErrorsCount > 0;
-            
-            public CompilationResult(List<CompilerMessage> sortedLogs, int warningsCount, int errorsCount) 
-            {
-                SortedLogs = sortedLogs;
-                WarningsCount = warningsCount;
-                ErrorsCount = errorsCount;
-            }
-        }
-        
-        private readonly List<CompilationRequest> _pendingRequests = new List<CompilationRequest>();
-        private readonly List<CompilerMessage> _compilationLogs = new List<CompilerMessage>();
-        private int _processedAssemblies = 0;
+        /// <summary>
+        /// Tracks whether a compilation cycle is actively in progress (from our request).
+        /// Prevents re-entrant AssetDatabase.Refresh + RequestScriptCompilation calls.
+        /// Uses Interlocked for thread safety (read from WebSocket thread, write from main thread).
+        /// </summary>
+        private static int _compilationInProgress = 0; // 0=false, 1=true
 
         public RecompileScriptsTool()
         {
             Name = "recompile_scripts";
             Description = "Recompiles all scripts in the Unity project";
-            IsAsync = true; // Compilation is asynchronous
+            IsAsync = true;
         }
-
-        /// <summary>
-        /// Execute the Recompile tool asynchronously
-        /// </summary>
-        /// <param name="parameters">Tool parameters as a JObject</param>
-        /// <param name="tcs">TaskCompletionSource to set the result or exception</param>
-        /// <summary>
-        /// Tracks whether a compilation cycle is actively in progress (from our request).
-        /// Prevents re-entrant AssetDatabase.Refresh + RequestScriptCompilation calls that
-        /// cause Unity to become unresponsive.
-        /// </summary>
-        private bool _compilationInProgress = false;
 
         public override void ExecuteAsync(JObject parameters, TaskCompletionSource<JObject> tcs)
         {
-            // Extract and store parameters
             var returnWithLogs = GetBoolParameter(parameters, "returnWithLogs", true);
             var logsLimit = Mathf.Clamp(GetIntParameter(parameters, "logsLimit", 100), 0, 1000);
-            var request = new CompilationRequest(returnWithLogs, logsLimit, tcs);
 
-            // [SAFE GUARD] If Unity is already compiling (from us or externally), do NOT
-            // call AssetDatabase.Refresh() or RequestScriptCompilation() again.
-            // Instead, return immediately with a "busy" status so Claude knows to wait.
-            if (EditorApplication.isCompiling || _compilationInProgress)
+            // [SAFE GUARD] Already compiling — return busy immediately
+            if (EditorApplication.isCompiling ||
+                System.Threading.Interlocked.CompareExchange(ref _compilationInProgress, 0, 0) == 1)
             {
-                McpLogger.LogInfo("Compilation already in progress — returning busy status (no re-trigger)");
-                var busyResponse = new JObject
+                McpLogger.LogInfo("Compilation already in progress — returning busy status");
+                tcs.SetResult(new JObject
                 {
                     ["success"] = true,
                     ["type"] = "text",
@@ -88,30 +49,30 @@ namespace McpUnity.Tools {
                                   "Calling recompile_scripts while compilation is in progress causes Unity to become unresponsive.",
                     ["logs"] = new JArray(),
                     ["compiling"] = true
-                };
-                tcs.SetResult(busyResponse);
+                });
                 return;
             }
 
-            bool hasActiveRequest = false;
-            lock (_pendingRequests)
+            // Return immediately — compilation will proceed asynchronously.
+            // Domain Reload will destroy this instance and drop the WebSocket connection.
+            // The client should wait and then check get_console_logs for results.
+            tcs.SetResult(new JObject
             {
-                hasActiveRequest = _pendingRequests.Count > 0;
-                _pendingRequests.Add(request);
-            }
+                ["success"] = true,
+                ["type"] = "text",
+                ["message"] = "Compilation triggered. Unity will recompile scripts and perform a domain reload. " +
+                              "Wait 30-60 seconds, then check results with get_console_logs(logType='error'). " +
+                              "The WebSocket connection will drop during domain reload and auto-reconnect." +
+                              (returnWithLogs ? $" (returnWithLogs: true, logsLimit: {logsLimit} — use get_console_logs after reload)" : ""),
+                ["logs"] = new JArray(),
+                ["compiling"] = true,
+                ["action"] = "compilation_triggered"
+            });
 
-            if (hasActiveRequest)
-            {
-                McpLogger.LogInfo("Recompilation already queued. Waiting for completion...");
-                return;
-            }
-
-            // On first request, initialize compilation listeners and start compilation
-            _compilationInProgress = true;
+            // Now trigger compilation (will cause domain reload if scripts changed)
+            System.Threading.Interlocked.Exchange(ref _compilationInProgress, 1);
             StartCompilationTracking();
 
-            // Force Unity to detect external file changes (e.g. from Claude Write tool)
-            // Without this, Unity won't see .cs changes made while editor is unfocused
             McpLogger.LogInfo("Refreshing AssetDatabase to detect external file changes...");
             AssetDatabase.Refresh();
 
@@ -119,9 +80,11 @@ namespace McpUnity.Tools {
             CompilationPipeline.RequestScriptCompilation();
         }
 
-        /// <summary>
-        /// Subscribe to compilation events, reset tracked state
-        /// </summary>
+        // ── Compilation tracking (for logging only, not for TCS) ──────
+
+        private readonly List<CompilerMessage> _compilationLogs = new List<CompilerMessage>();
+        private int _processedAssemblies = 0;
+
         private void StartCompilationTracking()
         {
             _compilationLogs.Clear();
@@ -129,19 +92,13 @@ namespace McpUnity.Tools {
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
         }
-        
-        /// <summary>
-        /// Unsubscribe from compilation events
-        /// </summary>
+
         private void StopCompilationTracking()
         {
             CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompilationFinished;
             CompilationPipeline.compilationFinished -= OnCompilationFinished;
         }
 
-        /// <summary>
-        /// Record compilation logs for every single assembly
-        /// </summary>
         private void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
         {
             _processedAssemblies++;
@@ -149,107 +106,27 @@ namespace McpUnity.Tools {
         }
 
         /// <summary>
-        /// Stop tracking and complete all pending requests
+        /// Fires after compilation completes (before domain reload if scripts changed).
+        /// Stores results in SessionState for post-reload retrieval.
+        /// Does NOT try to complete any TCS — it was already completed in ExecuteAsync.
         /// </summary>
         private void OnCompilationFinished(object _)
         {
-            McpLogger.LogInfo($"Recompilation completed. Processed {_processedAssemblies} assemblies with {_compilationLogs.Count} compiler messages");
-
-            // Sort logs by type: first errors, then warnings and info
-            List<CompilerMessage> sortedLogs = _compilationLogs.OrderBy(x => x.type).ToList();
             int errorsCount = _compilationLogs.Count(l => l.type == CompilerMessageType.Error);
             int warningsCount = _compilationLogs.Count(l => l.type == CompilerMessageType.Warning);
-            CompilationResult result = new CompilationResult(sortedLogs, warningsCount, errorsCount);
-            
-            // Stop tracking before completing requests
-            _compilationInProgress = false;
+
+            McpLogger.LogInfo(
+                $"Recompilation completed. Processed {_processedAssemblies} assemblies: " +
+                $"{errorsCount} error(s), {warningsCount} warning(s)");
+
+            // Persist in SessionState (survives domain reload)
+            SessionState.SetBool("McpUnity_LastCompilationHadErrors", errorsCount > 0);
+            SessionState.SetInt("McpUnity_LastCompilationErrorCount", errorsCount);
+            SessionState.SetInt("McpUnity_LastCompilationWarningCount", warningsCount);
+
+            System.Threading.Interlocked.Exchange(ref _compilationInProgress, 0);
             StopCompilationTracking();
-            
-            // Complete all requests received before compilation end, the next received request will start a new compilation
-            List<CompilationRequest> requestsToComplete = new List<CompilationRequest>();
-            
-            lock (_pendingRequests)
-            {
-                requestsToComplete.AddRange(_pendingRequests);
-                _pendingRequests.Clear();
-            }
-
-            foreach (var request in requestsToComplete)
-            {
-                CompleteRequest(request, result);
-            }
         }
 
-        /// <summary>
-        /// Process a completed compilation request
-        /// </summary>
-        private static void CompleteRequest(CompilationRequest request, CompilationResult result)
-        {
-            JArray logsArray = new JArray();
-            IEnumerable<CompilerMessage> logsToReturn = request.ReturnWithLogs ? result.SortedLogs.Take(request.LogsLimit) : Enumerable.Empty<CompilerMessage>();
-
-            foreach (var message in logsToReturn)
-            {
-                var logObject = new JObject 
-                {
-                    ["message"] = message.message,
-                    ["type"] = message.type.ToString()
-                };
-
-                // Add file information if available
-                if (!string.IsNullOrEmpty(message.file))
-                {
-                    logObject["file"] = message.file;
-                    logObject["line"] = message.line;
-                    logObject["column"] = message.column;
-                }
-
-                logsArray.Add(logObject);
-            }
-
-            string summaryMessage = result.HasErrors
-                                        ? $"Recompilation completed with {result.ErrorsCount} error(s) and {result.WarningsCount} warning(s)"
-                                        : $"Successfully recompiled all scripts with {result.WarningsCount} warning(s)";
-
-            summaryMessage += $" (returnWithLogs: {request.ReturnWithLogs}, logsLimit: {request.LogsLimit})";
-
-            var response = new JObject 
-            {
-                ["success"] = true,
-                ["type"] = "text",
-                ["message"] = summaryMessage,
-                ["logs"] = logsArray
-            };
-
-            request.CompletionSource.SetResult(response);
-        }
-
-        /// <summary>
-        /// Helper method to safely extract integer parameters with default values
-        /// </summary>
-        /// <param name="parameters">JObject containing parameters</param>
-        /// <param name="key">Parameter key to extract</param>
-        /// <param name="defaultValue">Default value if parameter is missing or invalid</param>
-        /// <returns>Extracted integer value or default</returns>
-        private static int GetIntParameter(JObject parameters, string key, int defaultValue)
-        {
-            if (parameters?[key] != null && int.TryParse(parameters[key].ToString(), out int value))
-                return value;
-            return defaultValue;
-        }
-
-        /// <summary>
-        /// Helper method to safely extract boolean parameters with default values
-        /// </summary>
-        /// <param name="parameters">JObject containing parameters</param>
-        /// <param name="key">Parameter key to extract</param>
-        /// <param name="defaultValue">Default value if parameter is missing or invalid</param>
-        /// <returns>Extracted boolean value or default</returns>
-        private static bool GetBoolParameter(JObject parameters, string key, bool defaultValue)
-        {
-            if (parameters?[key] != null && bool.TryParse(parameters[key].ToString(), out bool value))
-                return value;
-            return defaultValue;
-        }
     }
 }

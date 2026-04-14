@@ -15,7 +15,7 @@ namespace McpUnity.Tools
         /// The name of the tool as used in API calls
         /// </summary>
         public string Name { get; protected set; }
-        
+
         /// <summary>
         /// Description of the tool's functionality
         /// </summary>
@@ -27,6 +27,37 @@ namespace McpUnity.Tools
         /// If false, Execute should be overridden.
         /// </summary>
         public bool IsAsync { get; protected set; } = false;
+
+        // ── Parameter extraction helpers ──────────────────────────────
+
+        protected static int GetIntParameter(JObject parameters, string key, int defaultValue)
+        {
+            if (parameters?[key] != null && int.TryParse(parameters[key].ToString(), out int value))
+                return value;
+            return defaultValue;
+        }
+
+        protected static bool GetBoolParameter(JObject parameters, string key, bool defaultValue)
+        {
+            if (parameters?[key] != null && bool.TryParse(parameters[key].ToString(), out bool value))
+                return value;
+            return defaultValue;
+        }
+
+        protected static string GetStringParameter(JObject parameters, string key, string defaultValue = null)
+        {
+            var val = parameters?[key]?.ToString();
+            return string.IsNullOrEmpty(val) ? defaultValue : val;
+        }
+
+        protected static float GetFloatParameter(JObject parameters, string key, float defaultValue)
+        {
+            if (parameters?[key] != null && float.TryParse(parameters[key].ToString(),
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float value))
+                return value;
+            return defaultValue;
+        }
         
         /// <summary>
         /// Execute the tool asynchronously with the provided parameters.

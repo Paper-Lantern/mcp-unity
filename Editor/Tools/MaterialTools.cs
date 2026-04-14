@@ -9,7 +9,7 @@ using Newtonsoft.Json.Linq;
 namespace McpUnity.Tools
 {
     /// <summary>
-    /// Utility class for Material tool operations
+    /// Utility class for Material-specific operations (shader lookup, material loading, property conversion)
     /// </summary>
     public static class MaterialToolUtils
     {
@@ -170,66 +170,6 @@ namespace McpUnity.Tools
             return null;
         }
 
-        /// <summary>
-        /// Find a GameObject by instance ID or path
-        /// </summary>
-        public static GameObject FindGameObject(int? instanceId, string objectPath)
-        {
-            GameObject gameObject = null;
-
-            if (instanceId.HasValue)
-            {
-                gameObject = EditorUtility.InstanceIDToObject(instanceId.Value) as GameObject;
-            }
-            else if (!string.IsNullOrEmpty(objectPath))
-            {
-                gameObject = GameObject.Find(objectPath);
-
-                if (gameObject == null)
-                {
-                    // Try to find using hierarchy path
-                    gameObject = FindGameObjectByPath(objectPath);
-                }
-            }
-
-            return gameObject;
-        }
-
-        /// <summary>
-        /// Find a GameObject by its hierarchy path
-        /// </summary>
-        private static GameObject FindGameObjectByPath(string path)
-        {
-            string[] pathParts = path.Split('/');
-            GameObject[] rootGameObjects = UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects();
-
-            if (pathParts.Length == 0)
-            {
-                return null;
-            }
-
-            foreach (GameObject rootObj in rootGameObjects)
-            {
-                if (rootObj.name == pathParts[0])
-                {
-                    GameObject current = rootObj;
-
-                    for (int i = 1; i < pathParts.Length; i++)
-                    {
-                        Transform child = current.transform.Find(pathParts[i]);
-                        if (child == null)
-                        {
-                            return null;
-                        }
-                        current = child.gameObject;
-                    }
-
-                    return current;
-                }
-            }
-
-            return null;
-        }
     }
 
     /// <summary>
@@ -451,15 +391,7 @@ namespace McpUnity.Tools
             string materialPath = parameters["materialPath"]?.ToObject<string>();
             int slot = parameters["slot"]?.ToObject<int?>() ?? 0;
 
-            // Validate parameters
-            if (!instanceId.HasValue && string.IsNullOrEmpty(objectPath))
-            {
-                return McpUnitySocketHandler.CreateErrorResponse(
-                    "Either 'instanceId' or 'objectPath' must be provided",
-                    "validation_error"
-                );
-            }
-
+            // Validate materialPath
             if (string.IsNullOrEmpty(materialPath))
             {
                 return McpUnitySocketHandler.CreateErrorResponse(
@@ -469,15 +401,8 @@ namespace McpUnity.Tools
             }
 
             // Find the GameObject
-            GameObject gameObject = MaterialToolUtils.FindGameObject(instanceId, objectPath);
-            if (gameObject == null)
-            {
-                string identifier = instanceId.HasValue ? $"ID {instanceId.Value}" : $"path '{objectPath}'";
-                return McpUnitySocketHandler.CreateErrorResponse(
-                    $"GameObject with {identifier} not found",
-                    "not_found_error"
-                );
-            }
+            JObject findError = GameObjectFinder.Find(instanceId, objectPath, out GameObject gameObject, out string identifierInfo);
+            if (findError != null) return findError;
 
             // Get the Renderer component
             Renderer renderer = gameObject.GetComponent<Renderer>();

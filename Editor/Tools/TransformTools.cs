@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEditor;
 using McpUnity.Unity;
+using McpUnity.Utils;
 using Newtonsoft.Json.Linq;
 
 namespace McpUnity.Tools
@@ -21,11 +22,9 @@ namespace McpUnity.Tools
         public override JObject Execute(JObject parameters)
         {
             // Find the GameObject
-            var findResult = TransformToolUtils.FindGameObject(parameters);
-            if (findResult.Error != null)
-                return findResult.Error;
+            JObject findError = GameObjectFinder.Find(parameters, out GameObject gameObject, out _);
+            if (findError != null) return findError;
 
-            GameObject gameObject = findResult.GameObject;
             Transform transform = gameObject.transform;
 
             // Extract position
@@ -77,7 +76,7 @@ namespace McpUnity.Tools
                 ["message"] = $"GameObject '{gameObject.name}' moved successfully.",
                 ["instanceId"] = gameObject.GetInstanceID(),
                 ["name"] = gameObject.name,
-                ["path"] = TransformToolUtils.GetGameObjectPath(gameObject),
+                ["path"] = GameObjectFinder.GetPath(gameObject),
                 ["position"] = new JObject
                 {
                     ["world"] = new JObject
@@ -113,11 +112,9 @@ namespace McpUnity.Tools
         public override JObject Execute(JObject parameters)
         {
             // Find the GameObject
-            var findResult = TransformToolUtils.FindGameObject(parameters);
-            if (findResult.Error != null)
-                return findResult.Error;
+            JObject findError = GameObjectFinder.Find(parameters, out GameObject gameObject, out _);
+            if (findError != null) return findError;
 
-            GameObject gameObject = findResult.GameObject;
             Transform transform = gameObject.transform;
 
             // Extract rotation (Euler angles)
@@ -169,7 +166,7 @@ namespace McpUnity.Tools
                 ["message"] = $"GameObject '{gameObject.name}' rotated successfully.",
                 ["instanceId"] = gameObject.GetInstanceID(),
                 ["name"] = gameObject.name,
-                ["path"] = TransformToolUtils.GetGameObjectPath(gameObject),
+                ["path"] = GameObjectFinder.GetPath(gameObject),
                 ["rotation"] = new JObject
                 {
                     ["world"] = new JObject
@@ -205,11 +202,9 @@ namespace McpUnity.Tools
         public override JObject Execute(JObject parameters)
         {
             // Find the GameObject
-            var findResult = TransformToolUtils.FindGameObject(parameters);
-            if (findResult.Error != null)
-                return findResult.Error;
+            JObject findError = GameObjectFinder.Find(parameters, out GameObject gameObject, out _);
+            if (findError != null) return findError;
 
-            GameObject gameObject = findResult.GameObject;
             Transform transform = gameObject.transform;
 
             // Extract scale
@@ -256,7 +251,7 @@ namespace McpUnity.Tools
                 ["message"] = $"GameObject '{gameObject.name}' scaled successfully.",
                 ["instanceId"] = gameObject.GetInstanceID(),
                 ["name"] = gameObject.name,
-                ["path"] = TransformToolUtils.GetGameObjectPath(gameObject),
+                ["path"] = GameObjectFinder.GetPath(gameObject),
                 ["scale"] = new JObject
                 {
                     ["x"] = transform.localScale.x,
@@ -283,11 +278,9 @@ namespace McpUnity.Tools
         public override JObject Execute(JObject parameters)
         {
             // Find the GameObject
-            var findResult = TransformToolUtils.FindGameObject(parameters);
-            if (findResult.Error != null)
-                return findResult.Error;
+            JObject findError = GameObjectFinder.Find(parameters, out GameObject gameObject, out _);
+            if (findError != null) return findError;
 
-            GameObject gameObject = findResult.GameObject;
             Transform transform = gameObject.transform;
 
             // Check that at least one transform property is provided
@@ -361,7 +354,7 @@ namespace McpUnity.Tools
                 ["message"] = $"GameObject '{gameObject.name}' transform updated successfully.",
                 ["instanceId"] = gameObject.GetInstanceID(),
                 ["name"] = gameObject.name,
-                ["path"] = TransformToolUtils.GetGameObjectPath(gameObject),
+                ["path"] = GameObjectFinder.GetPath(gameObject),
                 ["transform"] = new JObject
                 {
                     ["position"] = new JObject
@@ -405,79 +398,4 @@ namespace McpUnity.Tools
         }
     }
 
-    /// <summary>
-    /// Utility class for common transform tool operations
-    /// </summary>
-    internal static class TransformToolUtils
-    {
-        /// <summary>
-        /// Result of finding a GameObject
-        /// </summary>
-        public struct FindResult
-        {
-            public GameObject GameObject;
-            public JObject Error;
-        }
-
-        /// <summary>
-        /// Find a GameObject by instanceId or objectPath from parameters
-        /// </summary>
-        public static FindResult FindGameObject(JObject parameters)
-        {
-            int? instanceId = parameters["instanceId"]?.ToObject<int?>();
-            string objectPath = parameters["objectPath"]?.ToObject<string>();
-
-            GameObject gameObject = null;
-            string identifierInfo = "";
-
-            if (instanceId.HasValue)
-            {
-                gameObject = EditorUtility.InstanceIDToObject(instanceId.Value) as GameObject;
-                identifierInfo = $"instance ID {instanceId.Value}";
-            }
-            else if (!string.IsNullOrEmpty(objectPath))
-            {
-                gameObject = GameObject.Find(objectPath);
-                identifierInfo = $"path '{objectPath}'";
-            }
-            else
-            {
-                return new FindResult
-                {
-                    Error = McpUnitySocketHandler.CreateErrorResponse(
-                        "Either 'instanceId' or 'objectPath' must be provided",
-                        "validation_error"
-                    )
-                };
-            }
-
-            if (gameObject == null)
-            {
-                return new FindResult
-                {
-                    Error = McpUnitySocketHandler.CreateErrorResponse(
-                        $"GameObject not found with {identifierInfo}",
-                        "not_found_error"
-                    )
-                };
-            }
-
-            return new FindResult { GameObject = gameObject };
-        }
-
-        /// <summary>
-        /// Get the hierarchy path of a GameObject
-        /// </summary>
-        public static string GetGameObjectPath(GameObject obj)
-        {
-            if (obj == null) return null;
-            string path = "/" + obj.name;
-            while (obj.transform.parent != null)
-            {
-                obj = obj.transform.parent.gameObject;
-                path = "/" + obj.name + path;
-            }
-            return path;
-        }
-    }
 }

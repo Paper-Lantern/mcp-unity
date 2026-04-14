@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEditor;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using WebSocketSharp;
@@ -24,21 +25,12 @@ namespace McpUnity.Unity
     public class McpUnitySocketHandler : WebSocketBehavior
     {
         private readonly McpUnityServer _server;
-        
-        /// <summary>
-        /// Default constructor required by WebSocketSharp
-        /// </summary>
+
         public McpUnitySocketHandler(McpUnityServer server)
         {
             _server = server;
         }
-        
-        /// <summary>
-        /// Create a standardized error response
-        /// </summary>
-        /// <param name="message">Error message</param>
-        /// <param name="errorType">Type of error</param>
-        /// <returns>A JObject containing the error information</returns>
+
         public static JObject CreateErrorResponse(string message, string errorType)
         {
             return new JObject
@@ -50,19 +42,125 @@ namespace McpUnity.Unity
                 }
             };
         }
-        
-        /// <summary>
-        /// Global concurrency limiter — prevents main thread overload from parallel MCP requests.
-        /// Checked on the WebSocket thread BEFORE dispatching to Unity main thread.
-        /// </summary>
+
+        // ── Concurrency & Timeout ─────────────────────────────────────
+
         private static int _activeRequests = 0;
         private const int MAX_CONCURRENT_REQUESTS = 3;
+        private const double REQUEST_TIMEOUT_SECONDS = 60.0;
+
+        private class PendingRequest
+        {
+            public long StartTicks; // DateTimeOffset.UtcNow.Ticks — thread-safe
+            public TaskCompletionSource<JObject> Tcs;
+            public string Method;
+            public string RequestId;
+        }
+
+        private static readonly Dictionary<string, PendingRequest> _pendingRequests
+            = new Dictionary<string, PendingRequest>();
+        private static readonly object _pendingLock = new object();
+        private static int _timeoutCheckRegistered_int = 0; // 0=false, 1=true (Interlocked)
+        private static int _requestCounter = 0; // fallback key when requestId is null
 
         /// <summary>
-        /// Handle incoming messages from WebSocket clients.
-        /// NON-BLOCKING: dispatches work to Unity main thread and sends response via ContinueWith callback.
-        /// WebSocket thread is released immediately — no await, no thread pool exhaustion.
+        /// Register EditorApplication.update callback for timeout checking (once).
+        /// Called from OnMessage (WebSocket thread) — uses Interlocked for thread safety.
+        /// EditorApplication.update += is safe from any thread (Unity dispatches to main thread).
         /// </summary>
+        private static void EnsureTimeoutChecker()
+        {
+            if (Interlocked.CompareExchange(ref _timeoutCheckRegistered_int, 1, 0) == 0)
+            {
+                EditorApplication.update += CheckTimeouts;
+            }
+        }
+
+        /// <summary>
+        /// Runs every editor frame. Scans pending requests for timeouts.
+        /// Early-returns when no requests are pending (zero overhead).
+        /// </summary>
+        private static void CheckTimeouts()
+        {
+            List<PendingRequest> timedOut = null;
+
+            lock (_pendingLock)
+            {
+                if (_pendingRequests.Count == 0) return;
+
+                long nowTicks = DateTimeOffset.UtcNow.Ticks;
+                long timeoutTicks = (long)(REQUEST_TIMEOUT_SECONDS * TimeSpan.TicksPerSecond);
+                List<string> keysToRemove = null;
+
+                foreach (var kvp in _pendingRequests)
+                {
+                    if (nowTicks - kvp.Value.StartTicks > timeoutTicks)
+                    {
+                        if (keysToRemove == null) keysToRemove = new List<string>();
+                        keysToRemove.Add(kvp.Key);
+                        if (timedOut == null) timedOut = new List<PendingRequest>();
+                        timedOut.Add(kvp.Value);
+                    }
+                }
+
+                if (keysToRemove != null)
+                {
+                    foreach (var key in keysToRemove)
+                        _pendingRequests.Remove(key);
+                }
+            }
+
+            if (timedOut == null) return;
+
+            foreach (var pending in timedOut)
+            {
+                McpLogger.LogWarning(
+                    $"[TIMEOUT] Request '{pending.Method}' (id: {pending.RequestId}) " +
+                    $"timed out after {REQUEST_TIMEOUT_SECONDS}s — auto-completing with error");
+
+                // TrySetResult: safe if already completed by the tool
+                pending.Tcs.TrySetResult(CreateErrorResponse(
+                    $"Request timed out after {REQUEST_TIMEOUT_SECONDS} seconds. " +
+                    "The tool may be stuck or Unity main thread was blocked. " +
+                    "Wait a few seconds and retry.",
+                    "timeout"
+                ));
+                // ContinueWith callback will fire → _activeRequests decremented
+            }
+        }
+
+        /// <summary>
+        /// Register a pending request for timeout tracking.
+        /// </summary>
+        private static string TrackRequest(string requestId, string method, TaskCompletionSource<JObject> tcs)
+        {
+            string key = requestId ?? $"_auto_{Interlocked.Increment(ref _requestCounter)}";
+            lock (_pendingLock)
+            {
+                _pendingRequests[key] = new PendingRequest
+                {
+                    StartTicks = DateTimeOffset.UtcNow.Ticks,
+                    Tcs = tcs,
+                    Method = method,
+                    RequestId = key
+                };
+            }
+            return key;
+        }
+
+        /// <summary>
+        /// Remove a completed request from timeout tracking.
+        /// </summary>
+        private static void UntrackRequest(string key)
+        {
+            lock (_pendingLock)
+            {
+                _pendingRequests.Remove(key);
+            }
+        }
+
+        // ── OnMessage ─────────────────────────────────────────────────
+
         protected override void OnMessage(MessageEventArgs e)
         {
             try
@@ -97,8 +195,10 @@ namespace McpUnity.Unity
                 }
 
                 Interlocked.Increment(ref _activeRequests);
+                EnsureTimeoutChecker();
 
                 var tcs = new TaskCompletionSource<JObject>();
+                string trackingKey = TrackRequest(requestId, method, tcs);
 
                 if (string.IsNullOrEmpty(method))
                 {
@@ -118,10 +218,10 @@ namespace McpUnity.Unity
                 }
 
                 // NON-BLOCKING: respond via callback when main thread work completes.
-                // WebSocket thread returns immediately — no await, no thread pool exhaustion.
                 tcs.Task.ContinueWith(task =>
                 {
                     Interlocked.Decrement(ref _activeRequests);
+                    UntrackRequest(trackingKey);
                     try
                     {
                         JObject responseJson = task.IsFaulted
@@ -137,7 +237,6 @@ namespace McpUnity.Unity
                         McpLogger.LogError($"Error sending response for '{requestId}': {sendEx.Message}");
                     }
                 }, TaskScheduler.Default);
-                // ← OnMessage returns immediately. WebSocket thread is free.
             }
             catch (Exception ex)
             {
@@ -150,27 +249,16 @@ namespace McpUnity.Unity
                 catch { /* WebSocket may already be closed */ }
             }
         }
-        
-        /// <summary>
-        /// Handle WebSocket connection open.
-        /// Supports multiple concurrent MCP clients (e.g. multiple Claude Code instances).
-        /// Cleans up only inactive (dead) sessions to prevent file descriptor accumulation
-        /// while keeping other active clients connected.
-        /// websocket-sharp uses Mono's IOSelector/select(), which can crash when FD
-        /// values exceed ~1024, so stale session cleanup is important.
-        /// See: https://github.com/CoderGamester/mcp-unity/issues/110
-        /// </summary>
+
+        // ── Connection lifecycle ──────────────────────────────────────
+
         protected override void OnOpen()
         {
-            // Clean up inactive (dead) sessions to prevent file descriptor accumulation.
-            // Only removes sessions that are no longer connected — active clients are preserved.
-            // Note: Do NOT use ActiveIDs here — it pings every client and blocks.
             var inactiveIds = Sessions.InactiveIDs.ToList();
             if (inactiveIds.Count > 0)
             {
                 foreach (var oldId in inactiveIds)
                 {
-                    // Also remove from our tracking dictionary
                     _server.Clients.TryRemove(oldId, out _);
                     try
                     {
@@ -184,7 +272,6 @@ namespace McpUnity.Unity
                 McpLogger.LogInfo($"Cleaned up {inactiveIds.Count} inactive session(s)");
             }
 
-            // Extract client name from the X-Client-Name header (if available)
             string clientName = "";
             NameValueCollection headers = Context.Headers;
             if (headers != null && headers.Contains("X-Client-Name"))
@@ -192,36 +279,24 @@ namespace McpUnity.Unity
                 clientName = headers["X-Client-Name"];
             }
 
-            // Add the client to the server's tracking dictionary
             _server.Clients[ID] = clientName;
-
             McpLogger.LogInfo($"WebSocket client connected (ID: {ID}, Name: {(string.IsNullOrEmpty(clientName) ? "Unknown" : clientName)}, Total clients: {_server.Clients.Count})");
         }
-        
-        /// <summary>
-        /// Handle WebSocket connection close
-        /// </summary>
+
         protected override void OnClose(CloseEventArgs e)
         {
             _server.Clients.TryGetValue(ID, out string clientName);
-
-            // Remove the client from the server
             _server.Clients.TryRemove(ID, out _);
-            
             McpLogger.LogInfo($"WebSocket client '{clientName}' disconnected: {e.Reason} (Remaining clients: {_server.Clients.Count})");
         }
-        
-        /// <summary>
-        /// Handle WebSocket errors
-        /// </summary>
+
         protected override void OnError(ErrorEventArgs e)
         {
             McpLogger.LogError($"WebSocket error: {e.Message}");
         }
-        
-        /// <summary>
-        /// Execute a tool with the provided parameters
-        /// </summary>
+
+        // ── Tool & Resource execution ─────────────────────────────────
+
         private IEnumerator ExecuteTool(McpToolBase tool, JObject parameters, TaskCompletionSource<JObject> tcs)
         {
             try
@@ -233,24 +308,21 @@ namespace McpUnity.Unity
                 else
                 {
                     var result = tool.Execute(parameters);
-                    tcs.SetResult(result);
+                    tcs.TrySetResult(result);
                 }
             }
             catch (Exception ex)
             {
                 McpLogger.LogError($"Error executing tool {tool.Name}: {ex.Message}\n{ex.StackTrace}");
-                tcs.SetResult(CreateErrorResponse(
+                tcs.TrySetResult(CreateErrorResponse(
                     $"Failed to execute tool {tool.Name}: {ex.Message}",
                     "tool_execution_error"
                 ));
             }
-            
+
             yield return null;
         }
-        
-        /// <summary>
-        /// Fetch a resource with the provided parameters
-        /// </summary>
+
         private IEnumerator FetchResourceCoroutine(McpResourceBase resource, JObject parameters, TaskCompletionSource<JObject> tcs)
         {
             try
@@ -262,35 +334,27 @@ namespace McpUnity.Unity
                 else
                 {
                     var result = resource.Fetch(parameters);
-                    tcs.SetResult(result);
+                    tcs.TrySetResult(result);
                 }
             }
             catch (Exception ex)
             {
                 McpLogger.LogError($"Error fetching resource {resource.Name}: {ex.Message}\n{ex.StackTrace}");
-                tcs.SetResult(CreateErrorResponse(
+                tcs.TrySetResult(CreateErrorResponse(
                     $"Failed to fetch resource {resource.Name}: {ex.Message}",
                     "resource_fetch_error"
                 ));
             }
             yield return null;
         }
-        
-        /// <summary>
-        /// Create a JSON-RPC 2.0 response
-        /// </summary>
-        /// <param name="requestId">Request ID</param>
-        /// <param name="result">Result object</param>
-        /// <returns>JSON-RPC 2.0 response</returns>
+
         private JObject CreateResponse(string requestId, JObject result)
         {
-            // Format as JSON-RPC 2.0 response
             JObject jsonRpcResponse = new JObject
             {
                 ["id"] = requestId
             };
-            
-            // Add result or error
+
             if (result.TryGetValue("error", out var errorObj))
             {
                 jsonRpcResponse["error"] = errorObj;
@@ -299,7 +363,7 @@ namespace McpUnity.Unity
             {
                 jsonRpcResponse["result"] = result;
             }
-            
+
             return jsonRpcResponse;
         }
     }

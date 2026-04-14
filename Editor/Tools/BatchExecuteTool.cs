@@ -149,11 +149,19 @@ namespace McpUnity.Tools
                         toolException = ex;
                     }
 
-                    // Wait for async tool completion (yield must be outside try-catch)
+                    // Wait for async tool completion with timeout (yield must be outside try-catch)
                     if (toolException == null)
                     {
+                        const double OP_TIMEOUT_SECONDS = 60.0;
+                        double opStartTime = EditorApplication.timeSinceStartup;
                         while (!toolTcs.Task.IsCompleted)
                         {
+                            if (EditorApplication.timeSinceStartup - opStartTime > OP_TIMEOUT_SECONDS)
+                            {
+                                toolException = new TimeoutException(
+                                    $"Operation '{toolName}' timed out after {OP_TIMEOUT_SECONDS}s");
+                                break;
+                            }
                             yield return null;
                         }
 

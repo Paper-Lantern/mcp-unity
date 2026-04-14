@@ -2,116 +2,11 @@ using System;
 using UnityEngine;
 using UnityEditor;
 using McpUnity.Unity;
+using McpUnity.Utils;
 using Newtonsoft.Json.Linq;
 
 namespace McpUnity.Tools
 {
-    /// <summary>
-    /// Utility class for common GameObject operations
-    /// </summary>
-    public static class GameObjectToolUtils
-    {
-        /// <summary>
-        /// Find a GameObject by instance ID or hierarchy path
-        /// </summary>
-        /// <param name="instanceId">Optional instance ID</param>
-        /// <param name="objectPath">Optional hierarchy path</param>
-        /// <param name="gameObject">Output GameObject if found</param>
-        /// <param name="identifierInfo">Description of how the object was identified</param>
-        /// <returns>Error JObject if not found, null if successful</returns>
-        public static JObject FindGameObject(int? instanceId, string objectPath, out GameObject gameObject, out string identifierInfo)
-        {
-            gameObject = null;
-            identifierInfo = "";
-
-            if (instanceId.HasValue)
-            {
-                gameObject = EditorUtility.InstanceIDToObject(instanceId.Value) as GameObject;
-                identifierInfo = $"instance ID {instanceId.Value}";
-            }
-            else if (!string.IsNullOrEmpty(objectPath))
-            {
-                gameObject = GameObject.Find(objectPath);
-                if (gameObject == null)
-                {
-                    // Try finding by traversing hierarchy
-                    gameObject = FindGameObjectByPath(objectPath);
-                }
-                identifierInfo = $"path '{objectPath}'";
-            }
-            else
-            {
-                return McpUnitySocketHandler.CreateErrorResponse(
-                    "Either 'instanceId' or 'objectPath' must be provided.",
-                    "validation_error"
-                );
-            }
-
-            if (gameObject == null)
-            {
-                return McpUnitySocketHandler.CreateErrorResponse(
-                    $"GameObject not found using {identifierInfo}.",
-                    "not_found_error"
-                );
-            }
-
-            return null; // Success
-        }
-
-        /// <summary>
-        /// Find a GameObject by its hierarchy path
-        /// </summary>
-        private static GameObject FindGameObjectByPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return null;
-
-            path = path.TrimStart('/');
-            string[] parts = path.Split('/');
-
-            if (parts.Length == 0) return null;
-
-            // Find root object
-            GameObject current = null;
-            GameObject[] rootObjects = UnityEngine.SceneManagement.SceneManager.GetActiveScene().GetRootGameObjects();
-
-            foreach (var root in rootObjects)
-            {
-                if (root.name == parts[0])
-                {
-                    current = root;
-                    break;
-                }
-            }
-
-            if (current == null) return null;
-
-            // Traverse children
-            for (int i = 1; i < parts.Length; i++)
-            {
-                Transform child = current.transform.Find(parts[i]);
-                if (child == null) return null;
-                current = child.gameObject;
-            }
-
-            return current;
-        }
-
-        /// <summary>
-        /// Get the full hierarchy path of a GameObject
-        /// </summary>
-        public static string GetGameObjectPath(GameObject obj)
-        {
-            if (obj == null) return null;
-            string path = "/" + obj.name;
-            while (obj.transform.parent != null)
-            {
-                obj = obj.transform.parent.gameObject;
-                path = "/" + obj.name + path;
-            }
-            return path;
-        }
-    }
-
     /// <summary>
     /// Tool for duplicating GameObjects in the Unity Editor
     /// </summary>
@@ -143,7 +38,7 @@ namespace McpUnity.Tools
             }
 
             // Find source GameObject
-            JObject error = GameObjectToolUtils.FindGameObject(instanceId, objectPath, out GameObject sourceObject, out string identifierInfo);
+            JObject error = GameObjectFinder.Find(instanceId, objectPath, out GameObject sourceObject, out string identifierInfo);
             if (error != null) return error;
 
             // Find new parent if specified
@@ -202,7 +97,7 @@ namespace McpUnity.Tools
                 {
                     ["instanceId"] = duplicate.GetInstanceID(),
                     ["name"] = duplicate.name,
-                    ["path"] = GameObjectToolUtils.GetGameObjectPath(duplicate)
+                    ["path"] = GameObjectFinder.GetPath(duplicate)
                 });
             }
 
@@ -239,11 +134,11 @@ namespace McpUnity.Tools
             bool includeChildren = parameters["includeChildren"]?.ToObject<bool?>() ?? true;
 
             // Find target GameObject
-            JObject error = GameObjectToolUtils.FindGameObject(instanceId, objectPath, out GameObject targetObject, out string identifierInfo);
+            JObject error = GameObjectFinder.Find(instanceId, objectPath, out GameObject targetObject, out string identifierInfo);
             if (error != null) return error;
 
             string deletedName = targetObject.name;
-            string deletedPath = GameObjectToolUtils.GetGameObjectPath(targetObject);
+            string deletedPath = GameObjectFinder.GetPath(targetObject);
             int childCount = targetObject.transform.childCount;
 
             if (!includeChildren && childCount > 0)
@@ -300,10 +195,10 @@ namespace McpUnity.Tools
             bool worldPositionStays = parameters["worldPositionStays"]?.ToObject<bool?>() ?? true;
 
             // Find target GameObject
-            JObject error = GameObjectToolUtils.FindGameObject(instanceId, objectPath, out GameObject targetObject, out string identifierInfo);
+            JObject error = GameObjectFinder.Find(instanceId, objectPath, out GameObject targetObject, out string identifierInfo);
             if (error != null) return error;
 
-            string oldPath = GameObjectToolUtils.GetGameObjectPath(targetObject);
+            string oldPath = GameObjectFinder.GetPath(targetObject);
             Transform oldParent = targetObject.transform.parent;
 
             // Find new parent (null means root level)
@@ -406,7 +301,7 @@ namespace McpUnity.Tools
                 targetObject.transform.localScale = Vector3.one;
             }
 
-            string newPath = GameObjectToolUtils.GetGameObjectPath(targetObject);
+            string newPath = GameObjectFinder.GetPath(targetObject);
             string parentDescription = newParentTransform != null
                 ? $"'{newParentTransform.gameObject.name}'"
                 : "root level";

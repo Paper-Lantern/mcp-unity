@@ -60,5 +60,27 @@ namespace McpUnity.Resources
             // Default implementation throws, forcing async resources to override.
             tcs.SetException(new NotImplementedException($"Asynchronous FetchAsync not implemented for resource '{Name}'. Mark IsAsync=false and implement Fetch, or override FetchAsync."));
         }
+
+        // ── Parameter extraction helpers ──────────────────────────────
+
+        protected static int GetIntParameter(JObject parameters, string key, int defaultValue)
+        {
+            if (parameters?[key] != null && int.TryParse(parameters[key].ToString(), out int value))
+                return value;
+            return defaultValue;
+        }
+
+        protected static bool GetBoolParameter(JObject parameters, string key, bool defaultValue)
+        {
+            if (parameters?[key] != null && bool.TryParse(parameters[key].ToString(), out bool value))
+                return value;
+            return defaultValue;
+        }
+
+        protected static string GetStringParameter(JObject parameters, string key, string defaultValue = null)
+        {
+            var val = parameters?[key]?.ToString();
+            return string.IsNullOrEmpty(val) ? defaultValue : val;
+        }
     }
 }

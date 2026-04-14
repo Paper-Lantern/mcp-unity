@@ -56,34 +56,5 @@ namespace McpUnity.Resources
             return result;
         }
 
-        /// <summary>
-        /// Helper method to safely extract integer parameters with default values
-        /// </summary>
-        /// <param name="parameters">JObject containing parameters</param>
-        /// <param name="key">Parameter key to extract</param>
-        /// <param name="defaultValue">Default value if parameter is missing or invalid</param>
-        /// <returns>Extracted integer value or default</returns>
-        private static int GetIntParameter(JObject parameters, string key, int defaultValue)
-        {
-            if (parameters?[key] != null && int.TryParse(parameters[key].ToString(), out int value))
-                return value;
-            return defaultValue;
-        }
-
-        /// <summary>
-        /// Helper method to safely extract boolean parameters with default values
-        /// </summary>
-        /// <param name="parameters">JObject containing parameters</param>
-        /// <param name="key">Parameter key to extract</param>
-        /// <param name="defaultValue">Default value if parameter is missing or invalid</param>
-        /// <returns>Extracted boolean value or default</returns>
-        private static bool GetBoolParameter(JObject parameters, string key, bool defaultValue)
-        {
-            if (parameters?[key] != null && bool.TryParse(parameters[key].ToString(), out bool value))
-                return value;
-            return defaultValue;
-        }
-
-
     }
 }
