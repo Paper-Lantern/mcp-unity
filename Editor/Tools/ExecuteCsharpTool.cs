@@ -66,6 +66,34 @@ namespace McpUnity.Tools
                         extraUsings.Add(u.ToString());
                 }
 
+                // [SAFE GUARD] Play Mode freeze prevention — block file-change / assembly-reload inducing APIs.
+                // Pure read-only reflection code (e.g. ArchitectureVerifier.VerifyAll) still passes.
+                if (EditorApplication.isPlaying || EditorApplication.isPlayingOrWillChangePlaymode)
+                {
+                    string[] forbiddenApis = {
+                        "CompilationPipeline.RequestScriptCompilation",
+                        "AssetDatabase.Refresh",
+                        "AssetDatabase.ImportAsset",
+                        "AssetDatabase.SaveAssets",
+                        "AssetDatabase.ForceReserializeAssets",
+                        "EditorApplication.ExecuteMenuItem"
+                    };
+                    foreach (var forbidden in forbiddenApis)
+                    {
+                        if (code.IndexOf(forbidden, StringComparison.Ordinal) >= 0)
+                        {
+                            tcs.SetResult(new JObject
+                            {
+                                ["success"] = false,
+                                ["type"] = "text",
+                                ["code"] = "PLAYING_SKIP",
+                                ["message"] = $"PLAYING_SKIP: forbidden API '{forbidden}' while isPlaying. Exit Play Mode first."
+                            });
+                            return;
+                        }
+                    }
+                }
+
                 // Dispatch to coroutine so Phase 2 (csc process) runs on ThreadPool
                 EditorCoroutineUtility.StartCoroutineOwnerless(
                     CompileAndExecuteCoroutine(code, extraUsings, tcs));

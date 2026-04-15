@@ -36,6 +36,21 @@ namespace McpUnity.Tools {
             var returnWithLogs = GetBoolParameter(parameters, "returnWithLogs", true);
             var logsLimit = Mathf.Clamp(GetIntParameter(parameters, "logsLimit", 100), 0, 1000);
 
+            // [SAFE GUARD] Play Mode — Auto Refresh + assembly reload during Play causes freeze
+            if (EditorApplication.isPlaying || EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                McpLogger.LogWarning("recompile_scripts called during Play Mode — blocked to prevent freeze");
+                tcs.SetResult(new JObject
+                {
+                    ["success"] = false,
+                    ["type"] = "text",
+                    ["code"] = "PLAYING_SKIP",
+                    ["message"] = "Cannot recompile while Unity is in Play Mode (Asset Pipeline Auto Refresh + assembly reload causes freeze). Exit Play Mode first.",
+                    ["blocked"] = "playing"
+                });
+                return;
+            }
+
             // [SAFE GUARD] Already compiling — return busy immediately
             if (EditorApplication.isCompiling ||
                 System.Threading.Interlocked.CompareExchange(ref _compilationInProgress, 0, 0) == 1)

@@ -368,6 +368,10 @@ namespace McpUnity.Unity
             UnloadSceneTool unloadSceneTool = new UnloadSceneTool();
             _tools.Add(unloadSceneTool.Name, unloadSceneTool);
 
+            // Register GetEditorStateTool (side-effect free — precheck before risky calls)
+            GetEditorStateTool getEditorStateTool = new GetEditorStateTool();
+            _tools.Add(getEditorStateTool.Name, getEditorStateTool);
+
             // Register RecompileScriptsTool
             RecompileScriptsTool recompileScriptsTool = new RecompileScriptsTool();
             _tools.Add(recompileScriptsTool.Name, recompileScriptsTool);
